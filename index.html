@@ -1,0 +1,361 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Krishna Neon Trace</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; min-height: 100dvh; background: #000; overflow: hidden;
+    font-family: Georgia, 'Times New Roman', serif;
+  }
+  canvas {
+    display: block; width: 100vw; width: 100dvw; height: 100vh; height: 100dvh;
+    background: #000; object-fit: contain; touch-action: none;
+  }
+  button {
+    background: linear-gradient(135deg, #ff00ea, #00fff7); border: none; color: #000; font-weight: 700;
+    padding: 10px 22px; border-radius: 999px; cursor: pointer; font-size: 14px; letter-spacing: 0.5px;
+    position: fixed; left: 50%; bottom: calc(18px + env(safe-area-inset-bottom)); transform: translateX(-50%);
+    z-index: 2; min-height: 44px; white-space: nowrap;
+  }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
+  #fileInput { display: none; }
+  #hint {
+    position: fixed; top: 16px; left: 50%; transform: translateX(-50%);
+    color: #666; font-family: sans-serif; font-size: 12px; z-index: 2;
+  }
+  @media (max-width: 600px) {
+    button {
+      max-width: calc(100vw - 32px);
+      padding: 10px 18px;
+      font-size: 13px;
+    }
+    #hint {
+      top: calc(10px + env(safe-area-inset-top));
+      max-width: calc(100vw - 24px);
+      text-align: center;
+      line-height: 1.35;
+    }
+  }
+</style>
+</head>
+<body>
+
+  <div id="hint">Looking for krishnar.jpg… (click canvas to choose a file if it doesn't load)</div>
+  <canvas id="stage" width="400" height="400"></canvas>
+  <input type="file" id="fileInput" accept="image/*">
+  <button id="replayBtn" disabled>✨ Replay Trace</button>
+
+<script>
+(function(){
+  const SIZE = 400;
+  const canvas = document.getElementById('stage');
+  const ctx = canvas.getContext('2d');
+  const replayBtn = document.getElementById('replayBtn');
+  const fileInput = document.getElementById('fileInput');
+  const hint = document.getElementById('hint');
+
+  let tracePoints = [];
+  let lastImg = null;
+
+  // ---------- auto-load krishnar.jpg from same folder ----------
+  const autoImg = new Image();
+  autoImg.onload = () => {
+    hint.style.display = 'none';
+    lastImg = autoImg;
+    processImage(autoImg);
+  };
+  autoImg.onerror = () => {
+    hint.textContent = "Couldn't find krishnar.jpg next to this file — click the canvas to choose it.";
+  };
+  autoImg.src = 'krishnar.jpg';
+
+  canvas.addEventListener('click', () => fileInput.click());
+  fileInput.addEventListener('change', (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const img = new Image();
+    img.onload = () => {
+      hint.style.display = 'none';
+      lastImg = img;
+      processImage(img);
+    };
+    img.src = URL.createObjectURL(file);
+  });
+
+  function fitToCanvas(img){
+    const fitCanvas = document.createElement('canvas');
+    fitCanvas.width = SIZE; fitCanvas.height = SIZE;
+    const fctx = fitCanvas.getContext('2d');
+    fctx.fillStyle = '#000'; fctx.fillRect(0,0,SIZE,SIZE);
+    const scale = Math.min(SIZE/img.width, SIZE/img.height);
+    const nw = img.width*scale, nh = img.height*scale;
+    const left = Math.floor((SIZE-nw)/2);
+    const top = Math.floor((SIZE-nh)/2);
+    fctx.drawImage(img, left, top, nw, nh);
+    fitCanvas.traceBounds = { left, right: Math.ceil(left+nw), top, bottom: Math.ceil(top+nh) };
+    return fitCanvas;
+  }
+
+  function toGrayscale(imgData){
+    const {data, width, height} = imgData;
+    const gray = new Float32Array(width*height);
+    for (let i=0,p=0; i<data.length; i+=4,p++) gray[p] = 0.299*data[i]+0.587*data[i+1]+0.114*data[i+2];
+    return gray;
+  }
+
+  function gaussianBlur(src, w, h){
+    const kernel = [0.06,0.24,0.40,0.24,0.06];
+    const tmp = new Float32Array(w*h);
+    const out = new Float32Array(w*h);
+    for (let y=0; y<h; y++){
+      for (let x=0; x<w; x++){
+        let sum=0;
+        for (let k=-2;k<=2;k++){
+          const xx = Math.min(w-1, Math.max(0, x+k));
+          sum += src[y*w+xx]*kernel[k+2];
+        }
+        tmp[y*w+x]=sum;
+      }
+    }
+    for (let x=0; x<w; x++){
+      for (let y=0; y<h; y++){
+        let sum=0;
+        for (let k=-2;k<=2;k++){
+          const yy = Math.min(h-1, Math.max(0, y+k));
+          sum += tmp[yy*w+x]*kernel[k+2];
+        }
+        out[y*w+x]=sum;
+      }
+    }
+    return out;
+  }
+
+  function sobel(gray, w, h){
+    const mag = new Float32Array(w*h);
+    const ang = new Float32Array(w*h);
+    const gx=[-1,0,1,-2,0,2,-1,0,1], gy=[-1,-2,-1,0,0,0,1,2,1];
+    for (let y=1; y<h-1; y++){
+      for (let x=1; x<w-1; x++){
+        let sx=0, sy=0, k=0;
+        for (let j=-1;j<=1;j++) for (let i=-1;i<=1;i++){
+          const v = gray[(y+j)*w+(x+i)];
+          sx += v*gx[k]; sy += v*gy[k]; k++;
+        }
+        mag[y*w+x] = Math.sqrt(sx*sx+sy*sy);
+        ang[y*w+x] = Math.atan2(sy, sx);
+      }
+    }
+    return {mag, ang};
+  }
+
+  function nonMaxSuppress(mag, ang, w, h){
+    const out = new Float32Array(w*h);
+    for (let y=1; y<h-1; y++){
+      for (let x=1; x<w-1; x++){
+        const idx = y*w+x;
+        let deg = (ang[idx]*180/Math.PI + 180) % 180;
+        let n1, n2;
+        if (deg < 22.5 || deg >= 157.5)       { n1 = mag[idx-1]; n2 = mag[idx+1]; }
+        else if (deg < 67.5)                  { n1 = mag[idx-w+1]; n2 = mag[idx+w-1]; }
+        else if (deg < 112.5)                 { n1 = mag[idx-w]; n2 = mag[idx+w]; }
+        else                                  { n1 = mag[idx-w-1]; n2 = mag[idx+w+1]; }
+        out[idx] = (mag[idx] >= n1 && mag[idx] >= n2) ? mag[idx] : 0;
+      }
+    }
+    return out;
+  }
+
+  function hysteresis(nms, w, h, low, high){
+    const STRONG=2, WEAK=1;
+    const state = new Uint8Array(w*h);
+    for (let i=0;i<nms.length;i++){
+      if (nms[i] >= high) state[i] = STRONG;
+      else if (nms[i] >= low) state[i] = WEAK;
+    }
+    const result = new Uint8Array(w*h);
+    const stack = [];
+    for (let i=0;i<state.length;i++) if (state[i]===STRONG){ result[i]=1; stack.push(i); }
+    while (stack.length){
+      const idx = stack.pop();
+      const x = idx % w, y = (idx / w) | 0;
+      for (let dy=-1; dy<=1; dy++){
+        for (let dx=-1; dx<=1; dx++){
+          if (dx===0 && dy===0) continue;
+          const nx=x+dx, ny=y+dy;
+          if (nx<0||ny<0||nx>=w||ny>=h) continue;
+          const nIdx = ny*w+nx;
+          if (state[nIdx]===WEAK && !result[nIdx]){ result[nIdx]=1; stack.push(nIdx); }
+        }
+      }
+    }
+    return result;
+  }
+
+  function hslToRgb(h,s,l){
+    h=((h%360)+360)%360; s/=100; l/=100;
+    const c=(1-Math.abs(2*l-1))*s;
+    const x=c*(1-Math.abs((h/60)%2-1));
+    const m=l-c/2; let r=0,g=0,b=0;
+    if (h<60)[r,g,b]=[c,x,0]; else if(h<120)[r,g,b]=[x,c,0]; else if(h<180)[r,g,b]=[0,c,x];
+    else if(h<240)[r,g,b]=[0,x,c]; else if(h<300)[r,g,b]=[x,0,c]; else [r,g,b]=[c,0,x];
+    return [(r+m)*255,(g+m)*255,(b+m)*255];
+  }
+
+  // ---------- order edge pixels into a "drawn stroke" sequence ----------
+  // Walks along connected edge pixels (8-connectivity) so lines appear to
+  // grow continuously rather than popping in randomly, like a pen tracing them.
+  function buildTraceOrder(edges, w, h){
+    const visited = new Uint8Array(w*h);
+    const order = [];
+    const stack = [];
+    for (let seed = 0; seed < edges.length; seed++){
+      if (!edges[seed] || visited[seed]) continue;
+      stack.length = 0;
+      stack.push(seed);
+      visited[seed] = 1;
+      while (stack.length){
+        const idx = stack.pop();
+        order.push(idx);
+        const x = idx % w, y = (idx / w) | 0;
+        for (let dy=-1; dy<=1; dy++){
+          for (let dx=-1; dx<=1; dx++){
+            if (dx===0 && dy===0) continue;
+            const nx=x+dx, ny=y+dy;
+            if (nx<0||ny<0||nx>=w||ny>=h) continue;
+            const nIdx = ny*w+nx;
+            if (edges[nIdx] && !visited[nIdx]){
+              visited[nIdx] = 1;
+              stack.push(nIdx);
+            }
+          }
+        }
+      }
+    }
+    return order;
+  }
+
+  function processImage(img){
+    const fitCanvas = fitToCanvas(img);
+    const fctx = fitCanvas.getContext('2d');
+    const imgData = fctx.getImageData(0,0,SIZE,SIZE);
+    const traceBounds = fitCanvas.traceBounds;
+
+    const gray = toGrayscale(imgData);
+    const blurred = gaussianBlur(gray, SIZE, SIZE);
+    const {mag, ang} = sobel(blurred, SIZE, SIZE);
+    const nms = nonMaxSuppress(mag, ang, SIZE, SIZE);
+
+    // background estimate from the border, so a textured/paper background
+    // doesn't get traced along with the subject
+    let bgR=0, bgG=0, bgB=0, bgCount=0;
+    for (let y=0; y<SIZE; y++) for (let x=0; x<SIZE; x++) {
+      if (x < 12 || y < 12 || x >= SIZE-12 || y >= SIZE-12) {
+        const p=(y*SIZE+x)*4;
+        const brightness=imgData.data[p]+imgData.data[p+1]+imgData.data[p+2];
+        if (brightness > 45) {
+          bgR += imgData.data[p]; bgG += imgData.data[p+1]; bgB += imgData.data[p+2]; bgCount++;
+        }
+      }
+    }
+    bgR/=bgCount; bgG/=bgCount; bgB/=bgCount;
+
+    const scores = new Float32Array(nms.length);
+    const ranked = [];
+    for (let p=0; p<nms.length; p++) {
+      const x = p % SIZE, y = (p / SIZE) | 0;
+      if (x <= traceBounds.left + 1 || x >= traceBounds.right - 2 || y <= traceBounds.top + 1 || y >= traceBounds.bottom - 2) continue;
+      const q=p*4;
+      const distance=Math.hypot(imgData.data[q]-bgR, imgData.data[q+1]-bgG, imgData.data[q+2]-bgB);
+      const foreground=Math.max(0, Math.min(1, (distance-18)/58));
+      scores[p]=nms[p]*(0.06+0.94*foreground);
+      if (scores[p]>0) ranked.push(scores[p]);
+    }
+    ranked.sort((a,b)=>a-b);
+    const sens = 0.25;
+    const percentile = Math.max(0.58, 0.9 - sens*0.25);
+    const highThresh = ranked.length ? ranked[Math.floor((ranked.length-1)*percentile)] : 0;
+    const lowThresh = highThresh * 0.35;
+    const edges = hysteresis(scores, SIZE, SIZE, lowThresh, highThresh);
+
+    // build ordered trace points with their neon color baked in
+    const order = buildTraceOrder(edges, SIZE, SIZE);
+    tracePoints = new Array(order.length);
+    for (let i = 0; i < order.length; i++){
+      const p = order[i];
+      const x = p % SIZE, y = (p / SIZE) | 0;
+      const norm = highThresh ? Math.min(1, scores[p]/highThresh) : 0;
+      const hue = ((ang[p]*180/Math.PI)+180) % 360;
+      const light = 48 + norm*32;
+      const [r,g,b] = hslToRgb(hue, 100, light);
+      tracePoints[i] = { x, y, color: `rgb(${r|0},${g|0},${b|0})` };
+    }
+
+    replayBtn.disabled = false;
+    startReveal();
+  }
+
+  // ---------- progressive line-by-line trace reveal ----------
+  const TRACE_DURATION = 10000; // ms to draw all lines
+  let drawnCount = 0, startTime = null, running = false, rafId = null;
+
+  function drawFrame(ts){
+    if (!startTime) startTime = ts;
+    const t = Math.min(1, (ts - startTime) / TRACE_DURATION);
+    const targetCount = Math.floor(t * tracePoints.length);
+
+    ctx.save();
+    for (let i = drawnCount; i < targetCount; i++){
+      const p = tracePoints[i];
+      ctx.shadowBlur = 6;
+      ctx.shadowColor = p.color;
+      ctx.fillStyle = p.color;
+      ctx.fillRect(p.x, p.y, 1.5, 1.5);
+    }
+    ctx.restore();
+    drawnCount = targetCount;
+
+    if (t < 1){
+      rafId = requestAnimationFrame(drawFrame);
+    } else {
+      applyFinalGlow();
+      running = false;
+    }
+  }
+
+  function applyFinalGlow(){
+    const snapshot = ctx.getImageData(0, 0, SIZE, SIZE);
+    const glowCanvas = document.createElement('canvas');
+    glowCanvas.width = SIZE; glowCanvas.height = SIZE;
+    glowCanvas.getContext('2d').putImageData(snapshot, 0, 0);
+
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.filter = 'blur(4px)';
+    ctx.globalAlpha = 0.22;
+    ctx.drawImage(glowCanvas, 0, 0);
+    ctx.filter = 'blur(10px)';
+    ctx.globalAlpha = 0.12;
+    ctx.drawImage(glowCanvas, 0, 0);
+    ctx.restore();
+  }
+
+  function startReveal(){
+    if (!tracePoints.length || running) return;
+    running = true;
+    startTime = null;
+    drawnCount = 0;
+    if (rafId) cancelAnimationFrame(rafId);
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, SIZE, SIZE);
+    rafId = requestAnimationFrame(drawFrame);
+  }
+
+  replayBtn.addEventListener('click', startReveal);
+})();
+</script>
+
+</body>
+</html>
